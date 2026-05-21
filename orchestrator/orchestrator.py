@@ -125,30 +125,26 @@ async def main():
     await orchestrator.connect()
 
     try:
-        print("\n--- Сценарий: заселение гостя ---")
-        result = await orchestrator.check_in(
-            guest_name="Иван Иванов",
-            room_number=101,
-            nights=3,
-            check_in_date="2025-05-21",
-        )
-        print(f"[Результат] {result}")
+        print("\n--- Демо балансировки: 4 заселения параллельно ---")
+        guests = [
+            ("Иван Иванов", 101),
+            ("Мария Петрова", 102),
+            ("Сергей Сидоров", 103),
+            ("Анна Кузнецова", 104),
+        ]
+        tasks = [
+            orchestrator.check_in(name, room, 2, "2025-05-21")
+            for name, room in guests
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            print(f"[Результат] {r}")
 
-        print("\n--- Сценарий: выселение ---")
-        result = await orchestrator.check_out(
-            guest_name="Иван Иванов",
-            room_number=101,
-        )
-        print(f"[Результат] {result}")
-
-        print("\n--- Сценарий: запрос к несуществующему агенту (демо retry) ---")
-        result = await orchestrator.guest_request(
-            guest_name="Иван Иванов",
-            room_number=101,
-            request_type="room_service",
-            details="Кофе и круассан",
-        )
-        print(f"[Результат] {result}")
+        print("\n--- Выселение всех ---")
+        tasks = [orchestrator.check_out(name, room) for name, room in guests]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            print(f"[Результат] {r}")
 
     except TimeoutError as e:
         print(f"[Ошибка] исчерпаны все попытки: {e}")

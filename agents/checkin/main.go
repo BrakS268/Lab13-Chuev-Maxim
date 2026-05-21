@@ -45,7 +45,12 @@ func main() {
 		natsURL = nats.DefaultURL
 	}
 
-	logger := setupLogger()
+	agentID := os.Getenv("AGENT_ID")
+	if agentID == "" {
+		agentID = "default"
+	}
+
+	logger := setupLogger(agentID)
 
 	var nc *nats.Conn
 	var err error
@@ -62,33 +67,33 @@ func main() {
 	}
 	defer nc.Close()
 
-	logger.Printf("INFO: подключён к NATS %s", natsURL)
+	logger.Printf("INFO: агент [%s] подключён к NATS %s", agentID, natsURL)
 
-	nc.Subscribe("hotel.checkin", func(m *nats.Msg) {
+	nc.QueueSubscribe("hotel.checkin", "checkin-workers", func(m *nats.Msg) {
 		var task Task
 		if err := json.Unmarshal(m.Data, &task); err != nil {
 			logger.Printf("ERROR: не удалось разобрать задачу: %v", err)
 			return
 		}
 
-		logger.Printf("INFO: получена задача %s, тип=%s, гость=%s, номер=%d",
-			task.ID, task.Type, task.GuestName, task.RoomNumber)
+		logger.Printf("INFO: [%s] получена задача %s, тип=%s, гость=%s, номер=%d",
+			agentID, task.ID, task.Type, task.GuestName, task.RoomNumber)
 
-		result := processTask(nc, logger, task)
+		result := processTask(nc, logger, agentID, task)
 
 		atomic.AddInt64(&processedCount, 1)
-		logger.Printf("INFO: задача %s выполнена, статус=%s, всего обработано=%d",
-			task.ID, result.RoomStatus, atomic.LoadInt64(&processedCount))
+		logger.Printf("INFO: [%s] задача %s выполнена, статус=%s, всего обработано=%d",
+			agentID, task.ID, result.RoomStatus, atomic.LoadInt64(&processedCount))
 
 		data, _ := json.Marshal(result)
 		nc.Publish("hotel.results", data)
 	})
 
-	logger.Println("INFO: агент запущен, ожидаю задачи на hotel.checkin...")
+	logger.Printf("INFO: агент [%s] запущен, ожидаю задачи на hotel.checkin (queue=checkin-workers)...", agentID)
 	select {}
 }
 
-func setupLogger() *log.Logger {
+func setupLogger(agentID string) *log.Logger {
 	logDir := os.Getenv("LOG_DIR")
 	if logDir == "" {
 		logDir = "logs"
@@ -96,27 +101,27 @@ func setupLogger() *log.Logger {
 	os.MkdirAll(logDir, 0755)
 
 	logFile, err := os.OpenFile(
-		fmt.Sprintf("%s/checkin-agent.log", logDir),
+		fmt.Sprintf("%s/checkin-agent-%s.log", logDir, agentID),
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND,
 		0644,
 	)
 	if err != nil {
 		log.Printf("WARN: не удалось открыть файл лога: %v, пишу только в консоль", err)
-		return log.New(os.Stdout, "[CheckInAgent] ", log.LstdFlags)
+		return log.New(os.Stdout, fmt.Sprintf("[CheckInAgent-%s] ", agentID), log.LstdFlags)
 	}
 
 	writer := io.MultiWriter(os.Stdout, logFile)
-	return log.New(writer, "[CheckInAgent] ", log.LstdFlags)
+	return log.New(writer, fmt.Sprintf("[CheckInAgent-%s] ", agentID), log.LstdFlags)
 }
 
-func processTask(nc *nats.Conn, logger *log.Logger, task Task) Result {
+func processTask(nc *nats.Conn, logger *log.Logger, agentID string, task Task) Result {
 	switch task.Type {
 	case "check_in":
-		return handleCheckIn(logger, task)
+		return handleCheckIn(logger, agentID, task)
 	case "check_out":
-		return handleCheckOut(nc, logger, task)
+		return handleCheckOut(nc, logger, agentID, task)
 	default:
-		logger.Printf("ERROR: неизвестный тип задачи: %s", task.Type)
+		logger.Printf("ERROR: [%s] неизвестный тип задачи: %s", agentID, task.Type)
 		return Result{
 			TaskID:  task.ID,
 			Success: false,
@@ -125,22 +130,22 @@ func processTask(nc *nats.Conn, logger *log.Logger, task Task) Result {
 	}
 }
 
-func handleCheckIn(logger *log.Logger, task Task) Result {
+func handleCheckIn(logger *log.Logger, agentID string, task Task) Result {
 	if task.RoomNumber < 101 || (task.RoomNumber > 110 && task.RoomNumber < 201) || task.RoomNumber > 205 {
 		msg := "номер не существует"
-		logger.Printf("ERROR: задача %s — %s: %d", task.ID, msg, task.RoomNumber)
+		logger.Printf("ERROR: [%s] задача %s — %s: %d", agentID, task.ID, msg, task.RoomNumber)
 		return Result{TaskID: task.ID, Success: false, Output: msg}
 	}
 
 	if guest, busy := occupiedRooms[task.RoomNumber]; busy {
 		msg := "номер " + itoa(task.RoomNumber) + " уже занят гостем " + guest
-		logger.Printf("ERROR: задача %s — %s", task.ID, msg)
+		logger.Printf("ERROR: [%s] задача %s — %s", agentID, task.ID, msg)
 		return Result{TaskID: task.ID, Success: false, Output: msg}
 	}
 
 	if task.Nights < 1 {
 		msg := "минимальный срок проживания — 1 ночь"
-		logger.Printf("ERROR: задача %s — %s", task.ID, msg)
+		logger.Printf("ERROR: [%s] задача %s — %s", agentID, task.ID, msg)
 		return Result{TaskID: task.ID, Success: false, Output: msg}
 	}
 
@@ -157,10 +162,10 @@ func handleCheckIn(logger *log.Logger, task Task) Result {
 	}
 }
 
-func handleCheckOut(nc *nats.Conn, logger *log.Logger, task Task) Result {
+func handleCheckOut(nc *nats.Conn, logger *log.Logger, agentID string, task Task) Result {
 	if _, busy := occupiedRooms[task.RoomNumber]; !busy {
 		msg := "номер " + itoa(task.RoomNumber) + " не занят"
-		logger.Printf("ERROR: задача %s — %s", task.ID, msg)
+		logger.Printf("ERROR: [%s] задача %s — %s", agentID, task.ID, msg)
 		return Result{TaskID: task.ID, Success: false, Output: msg}
 	}
 
@@ -174,7 +179,7 @@ func handleCheckOut(nc *nats.Conn, logger *log.Logger, task Task) Result {
 	}
 	data, _ := json.Marshal(cleaningTask)
 	nc.Publish("hotel.cleaning", data)
-	logger.Printf("INFO: задача %s — отправлена задача уборки для номера %d", task.ID, task.RoomNumber)
+	logger.Printf("INFO: [%s] задача %s — отправлена задача уборки для номера %d", agentID, task.ID, task.RoomNumber)
 
 	msg := "гость " + task.GuestName + " выселен из номера " + itoa(task.RoomNumber) + ", уборка запланирована"
 	return Result{
