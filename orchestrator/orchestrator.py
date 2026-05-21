@@ -9,6 +9,9 @@ import nats
 from logger import setup_logger
 from metrics import Metrics
 
+MAX_RETRIES = 3
+RETRY_DELAY = 2
+
 
 class HotelOrchestrator:
     def __init__(self):
@@ -41,27 +44,39 @@ class HotelOrchestrator:
         task_id = str(uuid.uuid4())
         payload["task_id"] = task_id
 
-        future = asyncio.get_event_loop().create_future()
-        self.pending[task_id] = future
+        for attempt in range(1, MAX_RETRIES + 1):
+            future = asyncio.get_event_loop().create_future()
+            self.pending[task_id] = future
 
-        self.metrics.record_sent(subject)
-        await self.nc.publish(subject, json.dumps(payload).encode())
-        self.logger.info("отправлена задача %s в %s", task_id, subject)
+            self.metrics.record_sent(subject)
+            await self.nc.publish(subject, json.dumps(payload).encode())
+            self.logger.info("отправлена задача %s в %s (попытка %d/%d)", task_id, subject, attempt, MAX_RETRIES)
 
-        try:
-            result = await asyncio.wait_for(future, timeout)
-            if result.get("success"):
-                self.metrics.record_success()
-                self.logger.info("задача %s выполнена успешно: %s", task_id, result.get("output"))
-            else:
-                self.metrics.record_failure()
-                self.logger.error("задача %s завершилась с ошибкой: %s", task_id, result.get("output"))
-            return result
-        except asyncio.TimeoutError:
-            self.pending.pop(task_id, None)
-            self.metrics.record_timeout()
-            self.logger.error("таймаут задачи %s (топик=%s, timeout=%d сек)", task_id, subject, timeout)
-            raise TimeoutError(f"задача {task_id} не выполнена за {timeout} сек")
+            try:
+                result = await asyncio.wait_for(future, timeout)
+                if result.get("success"):
+                    self.metrics.record_success()
+                    self.logger.info("задача %s выполнена успешно: %s", task_id, result.get("output"))
+                else:
+                    self.metrics.record_failure()
+                    self.logger.error("задача %s завершилась с ошибкой: %s", task_id, result.get("output"))
+                return result
+
+            except asyncio.TimeoutError:
+                self.pending.pop(task_id, None)
+                self.metrics.record_timeout()
+                self.logger.error(
+                    "таймаут задачи %s (топик=%s, попытка %d/%d)",
+                    task_id, subject, attempt, MAX_RETRIES,
+                )
+                if attempt < MAX_RETRIES:
+                    self.metrics.record_retry()
+                    self.logger.info("повтор через %d сек...", RETRY_DELAY)
+                    await asyncio.sleep(RETRY_DELAY)
+                else:
+                    raise TimeoutError(
+                        f"задача {task_id} не выполнена после {MAX_RETRIES} попыток"
+                    )
 
     async def check_in(self, guest_name: str, room_number: int, nights: int, check_in_date: str) -> dict:
         return await self.send_task("hotel.checkin", {
@@ -126,8 +141,17 @@ async def main():
         )
         print(f"[Результат] {result}")
 
+        print("\n--- Сценарий: запрос к несуществующему агенту (демо retry) ---")
+        result = await orchestrator.guest_request(
+            guest_name="Иван Иванов",
+            room_number=101,
+            request_type="room_service",
+            details="Кофе и круассан",
+        )
+        print(f"[Результат] {result}")
+
     except TimeoutError as e:
-        print(f"[Ошибка] таймаут: {e}")
+        print(f"[Ошибка] исчерпаны все попытки: {e}")
     finally:
         await orchestrator.disconnect()
 

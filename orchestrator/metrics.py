@@ -10,6 +10,7 @@ class Metrics:
     tasks_succeeded: int = 0
     tasks_failed: int = 0
     tasks_timed_out: int = 0
+    tasks_retried: int = 0
     tasks_by_subject: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
     _start_time: float = field(default_factory=time.time)
 
@@ -26,6 +27,9 @@ class Metrics:
     def record_timeout(self):
         self.tasks_timed_out += 1
 
+    def record_retry(self):
+        self.tasks_retried += 1
+
     def summary(self) -> str:
         uptime = int(time.time() - self._start_time)
         lines = [
@@ -35,6 +39,7 @@ class Metrics:
             f"  Успешно:     {self.tasks_succeeded}",
             f"  Ошибок:      {self.tasks_failed}",
             f"  Таймаутов:   {self.tasks_timed_out}",
+            f"  Повторов:    {self.tasks_retried}",
             "  По топикам:",
         ]
         for subject, count in self.tasks_by_subject.items():
