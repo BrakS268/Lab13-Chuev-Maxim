@@ -73,3 +73,50 @@
 - Время: ~7 мин
 
 ---
+
+## Задание 4 (средняя): Настройка коммуникации через NATS
+
+**Инструмент:** Claude (claude.ai)
+
+**Промпт:**
+Задание 4 — развернуть NATS в Docker (docker-compose). Настроить взаимодействие между оркестратором и агентом, убедиться, что сообщения доставляются корректно.
+
+**Что сделано:**
+1. Создан `docker-compose.yml` — три сервиса:
+   - `nats` — брокер NATS 2.10 с healthcheck на /healthz, порты 4222 и 8222 (мониторинг)
+   - `checkin-agent` — Go-агент, зависит от healthy nats
+   - `orchestrator` — Python-оркестратор, зависит от healthy nats
+2. Создан `agents/checkin/Dockerfile` — двухэтапная сборка (builder + alpine)
+3. Создан `orchestrator/Dockerfile` — python:3.12-slim
+4. Создан `.env.example` — шаблон переменных окружения
+
+**Что исправлялось вручную:** —
+
+### Итого
+- Количество промптов: 1
+- Время: ~15 мин
+
+---
+
+## Задание 5 (средняя): Логирование и мониторинг
+
+**Инструмент:** Claude (claude.ai)
+
+**Промпт:**
+Задание 5 — добавить логирование в оркестратор и агента (уровни INFO, ERROR). Организовать вывод логов в консоль и файл. Добавить простую метрику (счётчик обработанных задач).
+
+**Что сделано:**
+1. Создан `orchestrator/logger.py` — setup_logger(): запись в консоль (INFO+) и RotatingFileHandler в файл (DEBUG+), формат с timestamp и именем логгера
+2. Создан `orchestrator/metrics.py` — класс Metrics: счётчики tasks_sent/succeeded/failed/timed_out, разбивка по топикам, метод summary()
+3. Обновлён `orchestrator/orchestrator.py` — подключены logger и metrics, каждое событие логируется с нужным уровнем
+4. Обновлён `agents/checkin/main.go` — setupLogger() пишет в консоль и файл через io.MultiWriter, atomic-счётчик обработанных задач
+5. Обновлён `docker-compose.yml` — переменная LOG_DIR=/logs и общий named volume logs для всех сервисов
+
+**Что исправлялось вручную:** —
+
+### Итого
+- Количество промптов: 1
+- Время: ~8 мин
+
+---
+

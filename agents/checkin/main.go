@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -34,6 +37,7 @@ type CleaningTask struct {
 }
 
 var occupiedRooms = map[int]string{}
+var processedCount int64
 
 func main() {
 	natsURL := os.Getenv("NATS_URL")
@@ -41,11 +45,10 @@ func main() {
 		natsURL = nats.DefaultURL
 	}
 
-	logger := log.New(os.Stdout, "[CheckInAgent] ", log.LstdFlags)
+	logger := setupLogger()
 
 	var nc *nats.Conn
 	var err error
-
 	for i := 0; i < 5; i++ {
 		nc, err = nats.Connect(natsURL)
 		if err == nil {
@@ -73,14 +76,37 @@ func main() {
 
 		result := processTask(nc, logger, task)
 
+		atomic.AddInt64(&processedCount, 1)
+		logger.Printf("INFO: задача %s выполнена, статус=%s, всего обработано=%d",
+			task.ID, result.RoomStatus, atomic.LoadInt64(&processedCount))
+
 		data, _ := json.Marshal(result)
 		nc.Publish("hotel.results", data)
-
-		logger.Printf("INFO: задача %s выполнена, статус номера=%s", task.ID, result.RoomStatus)
 	})
 
 	logger.Println("INFO: агент запущен, ожидаю задачи на hotel.checkin...")
 	select {}
+}
+
+func setupLogger() *log.Logger {
+	logDir := os.Getenv("LOG_DIR")
+	if logDir == "" {
+		logDir = "logs"
+	}
+	os.MkdirAll(logDir, 0755)
+
+	logFile, err := os.OpenFile(
+		fmt.Sprintf("%s/checkin-agent.log", logDir),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND,
+		0644,
+	)
+	if err != nil {
+		log.Printf("WARN: не удалось открыть файл лога: %v, пишу только в консоль", err)
+		return log.New(os.Stdout, "[CheckInAgent] ", log.LstdFlags)
+	}
+
+	writer := io.MultiWriter(os.Stdout, logFile)
+	return log.New(writer, "[CheckInAgent] ", log.LstdFlags)
 }
 
 func processTask(nc *nats.Conn, logger *log.Logger, task Task) Result {
@@ -119,7 +145,6 @@ func handleCheckIn(logger *log.Logger, task Task) Result {
 	}
 
 	occupiedRooms[task.RoomNumber] = task.GuestName
-
 	msg := "гость " + task.GuestName + " заселён в номер " + itoa(task.RoomNumber) +
 		" на " + itoa(task.Nights) + " ночей (с " + task.CheckInDate + ")"
 
@@ -152,7 +177,6 @@ func handleCheckOut(nc *nats.Conn, logger *log.Logger, task Task) Result {
 	logger.Printf("INFO: задача %s — отправлена задача уборки для номера %d", task.ID, task.RoomNumber)
 
 	msg := "гость " + task.GuestName + " выселен из номера " + itoa(task.RoomNumber) + ", уборка запланирована"
-
 	return Result{
 		TaskID:     task.ID,
 		Success:    true,

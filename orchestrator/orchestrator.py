@@ -6,21 +6,28 @@ from typing import Dict, Optional
 
 import nats
 
+from logger import setup_logger
+from metrics import Metrics
+
 
 class HotelOrchestrator:
     def __init__(self):
         self.nc: Optional[nats.NATS] = None
         self.pending: Dict[str, asyncio.Future] = {}
+        self.logger = setup_logger("orchestrator")
+        self.metrics = Metrics()
 
     async def connect(self):
         nats_url = os.getenv("NATS_URL", "nats://localhost:4222")
         self.nc = await nats.connect(nats_url)
         await self.nc.subscribe("hotel.results", cb=self._on_result)
-        print(f"[Orchestrator] подключён к NATS {nats_url}")
+        self.logger.info("подключён к NATS %s", nats_url)
 
     async def disconnect(self):
         if self.nc:
             await self.nc.close()
+        self.logger.info("отключён от NATS")
+        self.logger.info(self.metrics.summary())
 
     async def _on_result(self, msg):
         result = json.loads(msg.data.decode())
@@ -28,6 +35,7 @@ class HotelOrchestrator:
         if task_id in self.pending:
             self.pending[task_id].set_result(result)
             del self.pending[task_id]
+            self.logger.debug("получен результат для задачи %s", task_id)
 
     async def send_task(self, subject: str, payload: dict, timeout: int = 30) -> dict:
         task_id = str(uuid.uuid4())
@@ -36,14 +44,23 @@ class HotelOrchestrator:
         future = asyncio.get_event_loop().create_future()
         self.pending[task_id] = future
 
+        self.metrics.record_sent(subject)
         await self.nc.publish(subject, json.dumps(payload).encode())
-        print(f"[Orchestrator] отправлена задача {task_id} в {subject}")
+        self.logger.info("отправлена задача %s в %s", task_id, subject)
 
         try:
             result = await asyncio.wait_for(future, timeout)
+            if result.get("success"):
+                self.metrics.record_success()
+                self.logger.info("задача %s выполнена успешно: %s", task_id, result.get("output"))
+            else:
+                self.metrics.record_failure()
+                self.logger.error("задача %s завершилась с ошибкой: %s", task_id, result.get("output"))
             return result
         except asyncio.TimeoutError:
             self.pending.pop(task_id, None)
+            self.metrics.record_timeout()
+            self.logger.error("таймаут задачи %s (топик=%s, timeout=%d сек)", task_id, subject, timeout)
             raise TimeoutError(f"задача {task_id} не выполнена за {timeout} сек")
 
     async def check_in(self, guest_name: str, room_number: int, nights: int, check_in_date: str) -> dict:
@@ -99,15 +116,6 @@ async def main():
             room_number=101,
             nights=3,
             check_in_date="2025-05-21",
-        )
-        print(f"[Результат] {result}")
-
-        print("\n--- Сценарий: запрос гостя ---")
-        result = await orchestrator.guest_request(
-            guest_name="Иван Иванов",
-            room_number=101,
-            request_type="room_service",
-            details="Кофе и круассан",
         )
         print(f"[Результат] {result}")
 

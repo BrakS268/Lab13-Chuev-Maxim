@@ -5,6 +5,6 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY orchestrator.py ./
+COPY logger.py metrics.py orchestrator.py ./
 
 CMD ["python", "orchestrator.py"]
