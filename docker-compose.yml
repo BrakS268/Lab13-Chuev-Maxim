@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: hotel-nats
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["--http_port", "8222"]
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  checkin-agent:
+    build:
+      context: ./agents/checkin
+    container_name: hotel-checkin-agent
+    environment:
+      NATS_URL: nats://nats:4222
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: on-failure
+
+  orchestrator:
+    build:
+      context: ./orchestrator
+    container_name: hotel-orchestrator
+    environment:
+      NATS_URL: nats://nats:4222
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: on-failure
