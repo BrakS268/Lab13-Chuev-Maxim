@@ -74,5 +74,22 @@ services:
         condition: service_healthy
     restart: on-failure
 
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: hotel-api
+    ports:
+      - "8000:8000"
+    environment:
+      NATS_URL: nats://nats:4222
+      LOG_DIR: /logs
+    volumes:
+      - logs:/logs
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: on-failure
+
 volumes:
   logs:
