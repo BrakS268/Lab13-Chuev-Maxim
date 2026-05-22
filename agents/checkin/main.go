@@ -39,6 +39,12 @@ type CleaningTask struct {
 var occupiedRooms = map[int]string{}
 var processedCount int64
 
+func logf(logger *log.Logger, format string, args ...interface{}) {
+	if logger != nil {
+		logger.Printf(format, args...)
+	}
+}
+
 func main() {
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {
@@ -59,7 +65,7 @@ func main() {
 		if err == nil {
 			break
 		}
-		logger.Printf("WARN: не удалось подключиться к NATS (%s), попытка %d/5...", natsURL, i+1)
+		logf(logger, "WARN: не удалось подключиться к NATS (%s), попытка %d/5...", natsURL, i+1)
 		time.Sleep(2 * time.Second)
 	}
 	if err != nil {
@@ -67,29 +73,29 @@ func main() {
 	}
 	defer nc.Close()
 
-	logger.Printf("INFO: агент [%s] подключён к NATS %s", agentID, natsURL)
+	logf(logger, "INFO: агент [%s] подключён к NATS %s", agentID, natsURL)
 
 	nc.QueueSubscribe("hotel.checkin", "checkin-workers", func(m *nats.Msg) {
 		var task Task
 		if err := json.Unmarshal(m.Data, &task); err != nil {
-			logger.Printf("ERROR: не удалось разобрать задачу: %v", err)
+			logf(logger, "ERROR: не удалось разобрать задачу: %v", err)
 			return
 		}
 
-		logger.Printf("INFO: [%s] получена задача %s, тип=%s, гость=%s, номер=%d",
+		logf(logger, "INFO: [%s] получена задача %s, тип=%s, гость=%s, номер=%d",
 			agentID, task.ID, task.Type, task.GuestName, task.RoomNumber)
 
 		result := processTask(nc, logger, agentID, task)
 
-		atomic.AddInt64(&processedCount, 1)
-		logger.Printf("INFO: [%s] задача %s выполнена, статус=%s, всего обработано=%d",
-			agentID, task.ID, result.RoomStatus, atomic.LoadInt64(&processedCount))
+		count := atomic.AddInt64(&processedCount, 1)
+		logf(logger, "INFO: [%s] задача %s выполнена, статус=%s, всего обработано=%d",
+			agentID, task.ID, result.RoomStatus, count)
 
 		data, _ := json.Marshal(result)
 		nc.Publish("hotel.results", data)
 	})
 
-	logger.Printf("INFO: агент [%s] запущен, ожидаю задачи на hotel.checkin (queue=checkin-workers)...", agentID)
+	logf(logger, "INFO: агент [%s] запущен, ожидаю задачи на hotel.checkin (queue=checkin-workers)...", agentID)
 	select {}
 }
 
@@ -106,7 +112,6 @@ func setupLogger(agentID string) *log.Logger {
 		0644,
 	)
 	if err != nil {
-		log.Printf("WARN: не удалось открыть файл лога: %v, пишу только в консоль", err)
 		return log.New(os.Stdout, fmt.Sprintf("[CheckInAgent-%s] ", agentID), log.LstdFlags)
 	}
 
@@ -121,31 +126,27 @@ func processTask(nc *nats.Conn, logger *log.Logger, agentID string, task Task) R
 	case "check_out":
 		return handleCheckOut(nc, logger, agentID, task)
 	default:
-		logger.Printf("ERROR: [%s] неизвестный тип задачи: %s", agentID, task.Type)
-		return Result{
-			TaskID:  task.ID,
-			Success: false,
-			Output:  "неизвестный тип задачи: " + task.Type,
-		}
+		logf(logger, "ERROR: [%s] неизвестный тип задачи: %s", agentID, task.Type)
+		return Result{TaskID: task.ID, Success: false, Output: "неизвестный тип задачи: " + task.Type}
 	}
 }
 
 func handleCheckIn(logger *log.Logger, agentID string, task Task) Result {
 	if task.RoomNumber < 101 || (task.RoomNumber > 110 && task.RoomNumber < 201) || task.RoomNumber > 205 {
 		msg := "номер не существует"
-		logger.Printf("ERROR: [%s] задача %s — %s: %d", agentID, task.ID, msg, task.RoomNumber)
+		logf(logger, "ERROR: [%s] задача %s — %s: %d", agentID, task.ID, msg, task.RoomNumber)
 		return Result{TaskID: task.ID, Success: false, Output: msg}
 	}
 
 	if guest, busy := occupiedRooms[task.RoomNumber]; busy {
 		msg := "номер " + itoa(task.RoomNumber) + " уже занят гостем " + guest
-		logger.Printf("ERROR: [%s] задача %s — %s", agentID, task.ID, msg)
+		logf(logger, "ERROR: [%s] задача %s — %s", agentID, task.ID, msg)
 		return Result{TaskID: task.ID, Success: false, Output: msg}
 	}
 
 	if task.Nights < 1 {
 		msg := "минимальный срок проживания — 1 ночь"
-		logger.Printf("ERROR: [%s] задача %s — %s", agentID, task.ID, msg)
+		logf(logger, "ERROR: [%s] задача %s — %s", agentID, task.ID, msg)
 		return Result{TaskID: task.ID, Success: false, Output: msg}
 	}
 
@@ -153,42 +154,27 @@ func handleCheckIn(logger *log.Logger, agentID string, task Task) Result {
 	msg := "гость " + task.GuestName + " заселён в номер " + itoa(task.RoomNumber) +
 		" на " + itoa(task.Nights) + " ночей (с " + task.CheckInDate + ")"
 
-	return Result{
-		TaskID:     task.ID,
-		Success:    true,
-		Output:     msg,
-		RoomStatus: "occupied",
-		RoomNumber: task.RoomNumber,
-	}
+	return Result{TaskID: task.ID, Success: true, Output: msg, RoomStatus: "occupied", RoomNumber: task.RoomNumber}
 }
 
 func handleCheckOut(nc *nats.Conn, logger *log.Logger, agentID string, task Task) Result {
 	if _, busy := occupiedRooms[task.RoomNumber]; !busy {
 		msg := "номер " + itoa(task.RoomNumber) + " не занят"
-		logger.Printf("ERROR: [%s] задача %s — %s", agentID, task.ID, msg)
+		logf(logger, "ERROR: [%s] задача %s — %s", agentID, task.ID, msg)
 		return Result{TaskID: task.ID, Success: false, Output: msg}
 	}
 
 	delete(occupiedRooms, task.RoomNumber)
 
-	cleaningTask := CleaningTask{
-		TaskID:     task.ID + "-clean",
-		Type:       "clean_room",
-		RoomNumber: task.RoomNumber,
-		Priority:   "normal",
+	if nc != nil {
+		cleaningTask := CleaningTask{TaskID: task.ID + "-clean", Type: "clean_room", RoomNumber: task.RoomNumber, Priority: "normal"}
+		data, _ := json.Marshal(cleaningTask)
+		nc.Publish("hotel.cleaning", data)
+		logf(logger, "INFO: [%s] задача %s — отправлена задача уборки для номера %d", agentID, task.ID, task.RoomNumber)
 	}
-	data, _ := json.Marshal(cleaningTask)
-	nc.Publish("hotel.cleaning", data)
-	logger.Printf("INFO: [%s] задача %s — отправлена задача уборки для номера %d", agentID, task.ID, task.RoomNumber)
 
 	msg := "гость " + task.GuestName + " выселен из номера " + itoa(task.RoomNumber) + ", уборка запланирована"
-	return Result{
-		TaskID:     task.ID,
-		Success:    true,
-		Output:     msg,
-		RoomStatus: "needs_cleaning",
-		RoomNumber: task.RoomNumber,
-	}
+	return Result{TaskID: task.ID, Success: true, Output: msg, RoomStatus: "needs_cleaning", RoomNumber: task.RoomNumber}
 }
 
 func itoa(n int) string {
